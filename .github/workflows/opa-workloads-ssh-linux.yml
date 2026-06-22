@@ -1,0 +1,338 @@
+name: OPA Workloads — SSH Linux
+
+# Demonstrates secretless authentication to Okta Privileged Access (OPA) using
+# a GitHub OIDC token, then runs a simple SSH test on a Linux target.
+#
+# Required GitHub Actions Variables (Settings → Secrets and variables → Variables):
+#   OPA_ADDR                 — OPA tenant URL (e.g. https://xyz.pam.okta.com)
+#   SFT_TEAM                 — OPA team name (e.g. xyz)
+#   OPA_WORKLOAD_CONNECTION  — optional, defaults to github-actions
+#   OPA_WORKLOAD_ROLE        — optional, defaults to workload-role-1
+#   OPA_LINUX_TARGET         — optional, defaults to opa-linux-target
+#   AWS_GROUP_ID             — optional, Security Group ID for temporary runner IP access
+#   AWS_REGION               — optional, defaults to us-east-1
+#   AWS_ROLE_TO_ASSUME       — optional, IAM role ARN assumed via GitHub OIDC
+#   AWS_SECURITY_GROUP_PORT  — optional, defaults to 7234
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write   # Required to request a GitHub OIDC token
+  contents: read
+
+jobs:
+  ssh-linux:
+    name: SSH to Linux target via OPA Workloads
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install sft CLI
+        run: |
+          set -euo pipefail
+
+          # Add the Okta Privileged Access repository key.
+          curl -fsSL https://dist.scaleft.com/GPG-KEY-OktaPAM-2023 | gpg --dearmor | sudo tee /usr/share/keyrings/oktapam-2023-archive-keyring.gpg > /dev/null
+
+          # Create a package resource list entry for Ubuntu 24.04 noble.
+          echo "deb [signed-by=/usr/share/keyrings/oktapam-2023-archive-keyring.gpg] https://dist.scaleft.com/repos/deb noble okta" | sudo tee /etc/apt/sources.list.d/oktapam-stable.list > /dev/null
+
+          # Install the sft CLI.
+          echo "📦 Installing sft CLI ..."
+          sudo apt-get -qq update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -qq install -y \
+            -o Dpkg::Use-Pty=0 \
+            -o Dpkg::Progress-Fancy=0 \
+            scaleft-client-tools
+
+          echo "✅ sft installed: $(sft --version)"
+
+      # Optional AWS Security Group access configuration, it will run only if AWS_GROUP_ID and AWS_ROLE_TO_ASSUME
+      # are set in the workflow variables.
+      - name: Configure AWS credentials for temporary Security Group access
+        if: ${{ vars.AWS_GROUP_ID != '' && vars.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Allow current runner IP in AWS Security Group
+        if: ${{ vars.AWS_GROUP_ID != '' && vars.AWS_ROLE_TO_ASSUME != '' }}
+        env:
+          AWS_GROUP_ID: ${{ vars.AWS_GROUP_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+          AWS_SECURITY_GROUP_PORT: ${{ vars.AWS_SECURITY_GROUP_PORT || '7234' }}
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$AWS_SECURITY_GROUP_PORT" =~ ^[0-9]+$ ]] || [ "$AWS_SECURITY_GROUP_PORT" -lt 1 ] || [ "$AWS_SECURITY_GROUP_PORT" -gt 65535 ]; then
+            echo "❌ Invalid AWS_SECURITY_GROUP_PORT: must be a TCP port between 1 and 65535."
+            exit 1
+          fi
+
+          RUNNER_PUBLIC_IP=$(curl -sSfL https://checkip.amazonaws.com | tr -d '[:space:]')
+
+          if ! [[ "$RUNNER_PUBLIC_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+            echo "❌ Failed to detect a valid IPv4 runner public IP."
+            exit 1
+          fi
+
+          CIDR="${RUNNER_PUBLIC_IP}/32"
+          DESCRIPTION="created by GitHub Actions ${GITHUB_REPOSITORY} run ${GITHUB_RUN_ID}"
+
+          echo "🔐 AWS Security Group auto-update enabled."
+          echo "Opening temporary TCP/${AWS_SECURITY_GROUP_PORT} access for this GitHub-hosted runner."
+          echo "Runner public IP: ${RUNNER_PUBLIC_IP}"
+          echo "Runner CIDR: ${CIDR}"
+          echo "Target Security Group: ${AWS_GROUP_ID} (${AWS_REGION})"
+          echo "AWS_SECURITY_GROUP_RULE_CREATED=false" >> "$GITHUB_ENV"
+
+          set +e
+          OUTPUT=$(aws ec2 authorize-security-group-ingress \
+            --group-id "$AWS_GROUP_ID" \
+            --region "$AWS_REGION" \
+            --ip-permissions "IpProtocol=tcp,FromPort=${AWS_SECURITY_GROUP_PORT},ToPort=${AWS_SECURITY_GROUP_PORT},IpRanges=[{CidrIp=${CIDR},Description='${DESCRIPTION}'}]" \
+            --tag-specifications "ResourceType=security-group-rule,Tags=[{Key=CreatedBy,Value=GitHubActions},{Key=Repository,Value=${GITHUB_REPOSITORY}},{Key=GitHubRunId,Value=${GITHUB_RUN_ID}}]" 2>&1)
+          STATUS=$?
+          set -e
+
+          if [ "$STATUS" -ne 0 ]; then
+            if echo "$OUTPUT" | grep -q "InvalidPermission.Duplicate"; then
+              echo "ℹ️ Temporary Security Group rule already exists; continuing."
+            else
+              echo "❌ Failed to authorize temporary Security Group ingress."
+              echo "Attempted values: SG=${AWS_GROUP_ID}, region=${AWS_REGION}, port=${AWS_SECURITY_GROUP_PORT}, cidr=${CIDR}"
+              echo "$OUTPUT"
+              exit "$STATUS"
+            fi
+          else
+            echo "✅ Temporary Security Group rule added."
+            echo "AWS_SECURITY_GROUP_RULE_CREATED=true" >> "$GITHUB_ENV"
+          fi
+
+          echo "AWS_RUNNER_PUBLIC_IP=$RUNNER_PUBLIC_IP" >> "$GITHUB_ENV"
+          echo "AWS_SECURITY_GROUP_CIDR=$CIDR" >> "$GITHUB_ENV"
+          echo "AWS_SECURITY_GROUP_PORT=$AWS_SECURITY_GROUP_PORT" >> "$GITHUB_ENV"
+
+      # End of optional AWS Security Group configuration
+      
+      - name: Request GitHub OIDC token
+        env:
+          OPA_ADDR: ${{ vars.OPA_ADDR }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$OPA_ADDR" ]; then
+            echo "❌ Invalid configuration: OPA_ADDR is required."
+            exit 1
+          fi
+
+          OIDC_TOKEN=$(curl -sSfL \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OPA_ADDR}" \
+            | jq -r '.value')
+
+          if [ -z "$OIDC_TOKEN" ] || [ "$OIDC_TOKEN" = "null" ]; then
+            echo "❌ Failed to obtain GitHub OIDC token"
+            exit 1
+          fi
+
+          # ⚠️ LAB DEBUG ONLY:
+          # GitHub masks the full OIDC token in logs, and printing raw tokens is unsafe.
+          # For troubleshooting, print only the decoded JWT header and payload claims.
+          # This lab prints claims by design. Do not copy this behavior to production workflows.
+          echo "⚠️ LAB DEBUG: OIDC token claims are printed below. Do not do this in production."
+          echo " "
+
+          decode_jwt_part() {
+            local part="$1"
+            local padded_part
+            padded_part=$(printf '%s' "$part" | tr '_-' '/+')
+
+            case $((${#padded_part} % 4)) in
+              2) padded_part="${padded_part}==" ;;
+              3) padded_part="${padded_part}=" ;;
+            esac
+
+            printf '%s' "$padded_part" | base64 -d 2>/dev/null | jq .
+          }
+
+          JWT_HEADER=$(decode_jwt_part "$(echo "$OIDC_TOKEN" | cut -d '.' -f 1)")
+          JWT_PAYLOAD=$(decode_jwt_part "$(echo "$OIDC_TOKEN" | cut -d '.' -f 2)")
+
+          echo "OIDC_TOKEN_HEADER:"
+          echo "$JWT_HEADER"
+          echo " "
+          echo "OIDC_TOKEN_PAYLOAD:"
+          echo "$JWT_PAYLOAD"
+
+          echo "::add-mask::$OIDC_TOKEN"
+          echo "OIDC_TOKEN=$OIDC_TOKEN" >> "$GITHUB_ENV"
+          echo "✅ GitHub OIDC token obtained"
+
+      - name: Authenticate with OPA Workloads
+        env:
+          OPA_ADDR: ${{ vars.OPA_ADDR }}
+          SFT_TEAM: ${{ vars.SFT_TEAM }}
+          OPA_WORKLOAD_CONNECTION: ${{ vars.OPA_WORKLOAD_CONNECTION || 'github-actions' }}
+          OPA_WORKLOAD_ROLE: ${{ vars.OPA_WORKLOAD_ROLE || 'workload-role-1' }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$SFT_TEAM" ]; then
+            echo "❌ Invalid configuration: SFT_TEAM is required."
+            exit 1
+          fi
+
+          export OPA_TOKEN=$(sft wl authenticate \
+            --team "$SFT_TEAM" \
+            --connection "$OPA_WORKLOAD_CONNECTION" \
+            --jwt-env OIDC_TOKEN \
+            --role-hint "$OPA_WORKLOAD_ROLE" \
+            2>&1 | tr -d '\n\r')
+
+          if [[ "$OPA_TOKEN" == *"error"* ]] || [ -z "$OPA_TOKEN" ]; then
+            echo "❌ Failed to obtain OPA bearer token"
+            echo "Detail: $OPA_TOKEN"
+            exit 1
+          fi
+
+          # ⚠️ LAB DEBUG ONLY:
+          # Print decoded OPA token content when the token is JWT-shaped.
+          # This is useful for troubleshooting capabilities and claims, but do not do this in production.
+          echo "⚠️ LAB DEBUG: OPA token content is printed below when decodable. Do not do this in production."
+          echo " "
+
+          decode_jwt_part() {
+            local part="$1"
+            local padded_part
+            padded_part=$(printf '%s' "$part" | tr '_-' '/+')
+
+            case $((${#padded_part} % 4)) in
+              2) padded_part="${padded_part}==" ;;
+              3) padded_part="${padded_part}=" ;;
+            esac
+
+            printf '%s' "$padded_part" | base64 -d 2>/dev/null | jq .
+          }
+
+          if [[ "$OPA_TOKEN" == *.*.* ]]; then
+            OPA_TOKEN_HEADER=$(decode_jwt_part "$(echo "$OPA_TOKEN" | cut -d '.' -f 1)" || true)
+            OPA_TOKEN_PAYLOAD=$(decode_jwt_part "$(echo "$OPA_TOKEN" | cut -d '.' -f 2)" || true)
+
+            if [ -n "$OPA_TOKEN_HEADER" ] && [ -n "$OPA_TOKEN_PAYLOAD" ]; then
+              echo "OPA_TOKEN_HEADER:"
+              echo "$OPA_TOKEN_HEADER"
+              echo " "      
+              echo "OPA_TOKEN_PAYLOAD:"
+              echo "$OPA_TOKEN_PAYLOAD"
+            else
+              echo "OPA_TOKEN could not be decoded as JSON JWT content."
+            fi
+          else
+            echo "OPA_TOKEN is not JWT-shaped; it appears to be opaque, so there are no local claims to print."
+          fi
+
+          echo "::add-mask::$OPA_TOKEN"
+          echo "OPA_TOKEN=$OPA_TOKEN" >> "$GITHUB_ENV"
+          echo "OPA_ADDR=$OPA_ADDR"   >> "$GITHUB_ENV"
+          echo "SFT_TEAM=$SFT_TEAM"   >> "$GITHUB_ENV"
+          echo "✅ OPA bearer token obtained via workload authentication"
+
+      - name: Run SSH test
+        env:
+          OPA_LINUX_TARGET: ${{ vars.OPA_LINUX_TARGET || 'opa-linux-target' }}
+          AWS_SECURITY_GROUP_PORT: ${{ vars.AWS_SECURITY_GROUP_PORT || '7234' }}
+        run: |
+          set -euo pipefail
+
+          SSH_LOG="${RUNNER_TEMP}/sft-ssh.log"
+          SSH_DEBUG_LOG="${RUNNER_TEMP}/sft-ssh-debug.log"
+
+          echo "⚙️ Running: sample test commands on a Linux server"
+          echo " "
+          echo "📋 List available servers:"
+          echo " "
+
+          sft list-servers
+
+          echo " "
+          echo "🖥️ Connecting to SSH target '${OPA_LINUX_TARGET}'"
+          echo " "
+
+          # GitHub runners are non-interactive; use script to allocate a pseudo-terminal.
+          set +e
+          script -q -e -c "sft ssh '${OPA_LINUX_TARGET}' --command 'whoami && hostname && uname -a'" /dev/null >"${SSH_LOG}" 2>&1
+          SSH_EXIT=$?
+          set -e
+
+          echo "📄 sft ssh output"
+          echo " "
+          cat "${SSH_LOG}"
+
+          if [ "${SSH_EXIT}" -ne 0 ]; then
+            echo "🧪 Retrying once with SFT_LOG_LEVEL=debug for additional diagnostics..."
+
+            set +e
+            SFT_LOG_LEVEL=debug script -q -e -c "sft ssh '${OPA_LINUX_TARGET}' --command 'whoami && hostname && uname -a'" /dev/null >"${SSH_DEBUG_LOG}" 2>&1
+            SSH_DEBUG_EXIT=$?
+            set -e
+
+            echo "📄 sft ssh debug output"
+            cat "${SSH_DEBUG_LOG}"
+
+            echo "❌ SSH test failed with exit code ${SSH_EXIT}."
+            echo "Debug retry exit code: ${SSH_DEBUG_EXIT}."
+            exit "${SSH_EXIT}"
+          fi
+
+          echo " "
+          echo "✅ SSH test completed successfully"
+
+      # Optional cleanup of temporary AWS Security Group rule, it will run only if AWS_GROUP_ID and AWS_ROLE_TO_ASSUME    
+      # are set in the workflow variables.
+
+      - name: Remove current runner IP from AWS Security Group
+        if: ${{ always() && vars.AWS_GROUP_ID != '' && vars.AWS_ROLE_TO_ASSUME != '' }}
+        env:
+          AWS_GROUP_ID: ${{ vars.AWS_GROUP_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+        run: |
+          set -euo pipefail
+
+          if [ "${AWS_SECURITY_GROUP_RULE_CREATED:-false}" != "true" ] || [ -z "${AWS_SECURITY_GROUP_CIDR:-}" ]; then
+            echo "ℹ️ No temporary AWS Security Group rule was recorded for cleanup."
+            exit 0
+          fi
+
+          echo "🧹 Removing temporary TCP/${AWS_SECURITY_GROUP_PORT} Security Group rule for this runner."
+
+          set +e
+          OUTPUT=$(aws ec2 revoke-security-group-ingress \
+            --group-id "$AWS_GROUP_ID" \
+            --region "$AWS_REGION" \
+            --protocol tcp \
+            --port "$AWS_SECURITY_GROUP_PORT" \
+            --cidr "$AWS_SECURITY_GROUP_CIDR" 2>&1)
+          STATUS=$?
+          set -e
+
+          if [ "$STATUS" -ne 0 ]; then
+            if echo "$OUTPUT" | grep -qE "InvalidPermission.NotFound|does not exist"; then
+              echo "ℹ️ Temporary Security Group rule was already removed."
+            else
+              echo "❌ Failed to remove temporary Security Group ingress rule."
+              echo "$OUTPUT"
+              exit "$STATUS"
+            fi
+          else
+            echo "✅ Temporary Security Group rule removed."
+          fi
+
+      # End of optional AWS Security Group configuration
