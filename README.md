@@ -70,13 +70,67 @@ sequenceDiagram
     end
 ```
 
+### Token Exchange Examples
+
+The workflow prints decoded token claims for lab troubleshooting. This is useful to verify claim matching in OPA, but it should not be copied into production workflows.
+
+#### GitHub OIDC Token
+
+The GitHub runner first requests an OIDC token from `token.actions.githubusercontent.com`. OPA validates this token against the workload connection claims.
+
+```json
+{
+  "iss": "https://token.actions.githubusercontent.com",
+  "aud": "https://xyz.pam.okta.com",
+  "repository": "xyz/okta-lab-workloads",
+  "repository_owner": "xyz",
+  "repository_visibility": "private",
+  "ref": "refs/heads/main",
+  "ref_type": "branch",
+  "workflow": "OPA Workloads — SSH Linux",
+  "workflow_ref": "xyz/okta-lab-workloads/.github/workflows/opa-workloads-ssh-linux.yml@refs/heads/main",
+  "runner_environment": "github-hosted",
+  "sub": "repo:xyz/okta-lab-workloads:ref:refs/heads/main"
+}
+```
+
+The most useful claims for OPA workload connection rules are usually `repository_owner`, `repository`, `ref`, and `sub`.
+
+#### OPA Token After Workload Authentication
+
+After `sft wl authenticate`, OPA returns a short-lived token that includes the matched workload connection, role hint, team, and embedded GitHub workload claims.
+
+```json
+{
+  "aud": [
+    "okta.com"
+  ],
+  "iss": "00000000-0000-0000-0000-000000000000",
+  "oktapa.cid": "00000000-0000-0000-0000-000000000000",
+  "oktapa.cn": "github-actions",
+  "oktapa.rh": "workload-role-1",
+  "oktapa.tid": "00000000-0000-0000-0000-000000000000",
+  "oktapa.tn": "xyz",
+  "oktapa.wl": {
+    "repository": "xyz/okta-lab-workloads",
+    "repository_owner": "xyz",
+    "ref": "refs/heads/main",
+    "workflow": "OPA Workloads — SSH Linux",
+    "workflow_ref": "xyz/okta-lab-workloads/.github/workflows/opa-workloads-ssh-linux.yml@refs/heads/main"
+  },
+  "sub": "opa://xyz/github-actions/repo:xyz%2Fokta-lab-workloads:ref:refs%2Fheads%2Fmain"
+}
+```
+
+For SSH, a successful token should map to the expected workload role and policy, then allow OPA to issue credentials for the target server.
+
 ---
 
 ## Prerequisites
 
 - An **Okta Privileged Access** (OPA) tenant with Workloads feature enabled
-- An **Okta admin account** with DevOps Admin + Security Admin roles
-- A **GitHub repository** with Actions enabled
+- An **Okta Admin Account** with DevOps Admin + Security Admin roles
+- A **GitHub Repository** with Actions enabled
 - The `sft` CLI is installed automatically by the workflow (Ubuntu runner required)
 
 For faster and reusable automation runs, this lab can use the companion ScaleFT client container image:
@@ -119,14 +173,7 @@ The workload connection validates claims from the GitHub Actions OIDC token. Sta
 | One branch | `ref` | Equals | `refs/heads/main` | Restricts access to workflow runs from the `main` branch |
 | One workflow subject | `sub` | Equals | `repo:xyz/okta-lab-workloads:ref:refs/heads/main` | Combines repository and branch in one claim |
 
-For a simple lab, use:
-
-| Claim | Operator | Value |
-|-------|----------|-------|
-| `repository_owner` | Equals | `xyz` |
-| `repository` | Equals | `xyz/okta-lab-workloads` |
-
-For a stricter setup, add `ref = refs/heads/main` or use the full `sub` claim instead of separate repository/branch claims.
+For a simple lab it's okt the default claim of `repository_owner EQUALS xyz`, which allows any workflow from any repository owned by `xyz`. For better security, add the `repository` claim to restrict to a specific repository, and optionally the `ref` claim to restrict to a specific branch. The most secure option is to use the full `sub` claim, which combines repo and branch in one claim and cannot be bypassed by token manipulation.
 
 > After creation, the connection is in **Draft** status. A Security Admin must activate it before use.
 
@@ -138,11 +185,14 @@ Set the connection status from **Draft → Active**. Wait ~5 minutes for propaga
 
 Navigate to **Okta Privileged Access → Access → Workloads → Roles** and create a role bound to the connection above.
 
+You can name it for example `workload-role-1`.
+
 ![OPA workload role bound to the GitHub Actions connection](docs/images/opa-workload-role.png)
 
 ### 4. Policy Binding (Security Admin)
 
 Create a policy under **Okta Privileged Access → Policies**:
+- Name: `GitHub Actions Workloads Policy` (or similar)
 - Add the workload role as principal under **Select Workload Roles**
 - Do **not** enable MFA or Access Requests — a headless workload cannot respond to them
 - Publish the policy
@@ -151,13 +201,13 @@ Create a policy under **Okta Privileged Access → Policies**:
 
 #### SSH Use Case: Server SSH Session Rule
 
-For the supported SSH workflow, add a **Server SSH session rule** granting access to `opa-linux-target` (or your own target server). Optionally, enable the Gateway for SSH access if your target is behind a ScaleFT gateway.
+For the supported SSH workflow, add a **Server SSH session rule** granting access to your target server (i.e. `opa-linux-target`). Optionally, enable the Gateway for SSH access if your target is behind an OPA gateway.
 
 ![OPA server SSH session rule for the Linux target](docs/images/opa-server-ssh-rule.png)
 
 #### Secret Reveal Use Case: Secret Rule (Future Only)
 
-For the disabled Secret Reveal example, add a **Secret Rule** granting access to the `production_server_secrets` folder (or your own secret folder). This is documented for future readiness only: OPA Workload Principal access to `sft secrets reveal` is not yet supported.
+For the Secret Reveal example, add a **Secret Rule** granting access to the secret folder (i.e. `production_server_secrets` folder). This is documented for future readiness only: OPA Workload Principal access to `sft secrets reveal` is not yet supported.
 
 ![OPA secret rule granting reveal access to production_server_secrets](docs/images/opa-secret-rule.png)
 
