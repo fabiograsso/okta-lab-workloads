@@ -10,20 +10,6 @@ A GitHub Actions lab that demonstrates **OPA (Okta Privileged Access) Workloads*
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![GitHub Actions](https://img.shields.io/badge/github-actions-black.svg)](https://github.com/features/actions)
 
-## Table of Contents
-
-- [Overview](#-overview)
-  - [What is OPA Workloads?](#what-is-opa-workloads)
-  - [Lab Goals](#lab-goals)
-  - [Architecture](#architecture)
-- [Prerequisites](#-prerequisites)
-- [OPA Configuration](#-opa-configuration)
-- [GitHub Actions Configuration](#-github-actions-configuration)
-- [Workflows](#-workflows)
-- [Expected Output](#-expected-output)
-- [Troubleshooting](#-troubleshooting)
-- [Resources](#-resources)
-
 ---
 
 ## Overview
@@ -76,7 +62,7 @@ The workflow prints decoded token claims for lab troubleshooting. This is useful
 
 #### GitHub OIDC Token
 
-The GitHub runner first requests an OIDC token from `token.actions.githubusercontent.com`. OPA validates this token against the workload connection claims.
+The GitHub runner first requests an OIDC token from `token.actions.githubusercontent.com`. OPA then will validates this token against the workload connection claims.
 
 ```json
 {
@@ -98,7 +84,7 @@ The most useful claims for OPA workload connection rules are usually `repository
 
 #### OPA Token After Workload Authentication
 
-After `sft wl authenticate`, OPA returns a short-lived token that includes the matched workload connection, role hint, team, and embedded GitHub workload claims.
+After `sft wl authenticate`, OPA exchange the GitHub token, and returns a short-lived (ephemeral) token that includes the matched workload connection, role hint, team, and embedded GitHub workload claims.
 
 ```json
 {
@@ -122,11 +108,11 @@ After `sft wl authenticate`, OPA returns a short-lived token that includes the m
 }
 ```
 
-For SSH, a successful token should map to the expected workload role and policy, then allow OPA to issue credentials for the target server.
+A successful token should map to the expected workload role and policy, then allow the execution of the requested actions (i.e. an SSH session or secret reveal).
 
 ---
 
-## Prerequisites
+## Prerequisites for the Lab
 
 - An **Okta Privileged Access** (OPA) tenant with Workloads feature enabled
 - An **Okta Admin Account** with DevOps Admin + Security Admin roles
