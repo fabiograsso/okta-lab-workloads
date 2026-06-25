@@ -326,3 +326,8 @@ and
 `OPA_TOKEN is not valid: Missing capability: secret.resolve`
 
 explain that once it will be supported it should work :)
+
+## Branch Strategy
+- `main` must stay focused on the supported SSH workflow.
+- `workload-secrets-preview` preserves the experimental secret retrieval workflow and related notes.
+- Do not reintroduce executable secret workflows on `main` until OPA Workload Principal tokens support the required `sft secrets` capabilities.

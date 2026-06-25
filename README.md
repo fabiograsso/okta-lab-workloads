@@ -1,11 +1,11 @@
-# Okta Privileged Access — Workloads Lab
+# Okta Privileged Access — Workloads SSH Lab
 
 > **Note**: This is a lab environment for testing and demonstration purposes.
 
 > [!CAUTION]
 > **Not an Official Okta Product** - This is an independent community project and is not an official Okta product. Use at your own risk and always test in a non-production environment first.
 
-A GitHub Actions lab that demonstrates **OPA (Okta Privileged Access) Workloads** — the ability for non-human identities (CI/CD pipelines) to authenticate to OPA without static secrets, using GitHub's native OIDC token.
+A GitHub Actions lab that demonstrates **Okta Privileged Access (OPA) Workloads** with **Principal SSH access**. A GitHub-hosted runner authenticates to OPA without static secrets by using GitHub's native OIDC token, then runs a simple SSH command on an OPA-managed Linux target.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![GitHub Actions](https://img.shields.io/badge/github-actions-black.svg)](https://github.com/features/actions)
@@ -14,128 +14,66 @@ A GitHub Actions lab that demonstrates **OPA (Okta Privileged Access) Workloads*
 
 ## Overview
 
-### What is OPA Workloads?
+OPA Workloads provides secretless authentication for non-human identities such as CI/CD runners, service accounts, and automation jobs. Instead of storing a long-lived API key in GitHub Secrets, the GitHub Actions runner requests a short-lived OIDC token from GitHub. OPA validates that JWT, checks the configured workload connection claims, maps the workload to a workload role, and evaluates policy before allowing access.
 
-OPA Workloads provides **secretless authentication** for non-human identities (NHIs) such as CI/CD runners, service accounts, and containers. Instead of storing a static API key in GitHub Secrets, the GitHub Actions runner presents a **platform-signed JWT** (OIDC token) to OPA. OPA validates it cryptographically and issues a short-lived bearer token.
+This `main` branch intentionally focuses on the **currently working SSH use case**.
 
-This eliminates the **"secret zero" problem** — there is no bootstrap credential to manage, rotate, or leak.
+| Goal | Status | Workflow |
+|------|--------|----------|
+| Run an SSH test against a Linux target | Supported | [`opa-workloads-ssh-linux.yml`](.github/workflows/opa-workloads-ssh-linux.yml) |
+| Run the same SSH test from a prebuilt client container | Sample only | [`opa-workloads-ssh-linux.sampledocker`](.github/workflows/opa-workloads-ssh-linux.sampledocker) |
 
-### Lab Goals
+Secret retrieval and additional workload use cases are tracked as future examples. See [Upcoming Use Cases](#upcoming-use-cases).
 
-| Goal | Workflow | Notes |
-| ---- | -------- | ----- |
-| ✅ Run an SSH test against a Linux target | [`opa-workloads-ssh-linux.yml`](.github/workflows/opa-workloads-ssh-linux.yml) | |
-| ⏳ Reveal an OPA secret | [`opa-workloads-read-secret.off`](.github/workflows/opa-workloads-read-secret.off) | Not yet supported by OPA — file disabled, kept as reference |
+---
 
-### Architecture
+## Architecture
 
 ```mermaid
 sequenceDiagram
     participant GH as GitHub Actions Runner
     participant GHOIDC as GitHub OIDC Provider<br/>(token.actions.githubusercontent.com)
     participant OPA as Okta Privileged Access<br/>(xyz.pam.okta.com)
+    participant Target as OPA-managed Linux Target
 
-    GH->>GHOIDC: Request OIDC token<br>(audience = OPA tenant)
-    GHOIDC-->>GH: Signed JWT<br>(repo, branch, workflow claims)
+    GH->>GHOIDC: Request OIDC token<br/>(audience = OPA tenant)
+    GHOIDC-->>GH: Signed JWT<br/>(repo, branch, workflow claims)
 
     GH->>OPA: sft wl authenticate<br/>(JWT + connection name + role hint)
-    OPA<<->>GHOIDC: Validate JWT signature (JWKS)
-    OPA->>OPA: Check claims against workloads policies
-    OPA-->>GH: Short-lived OPA Token
-    
-    opt
-        Note over GH,OPA: Example of Principal SSH Access
-        GH->>OPA: SSH Connection<br>(sft ssh <linux-target> <commands>)
-        OPA-->>GH: SSH Session established (via ScaleFT CLI)
-    end
+    OPA->>GHOIDC: Validate JWT signature (JWKS)
+    OPA->>OPA: Check required claims and workload role policy
+    OPA-->>GH: Short-lived OPA token
 
-    opt
-        Note over GH,OPA: Example of Secret reveal
-        GH->>OPA: Secret request<br>(sft secrets reveal --name <secret>...)
-        OPA-->>GH: Secret key-value pairs
-    end
+    GH->>OPA: sft ssh <linux-target> --command ...
+    OPA->>Target: Authorize Principal SSH access
+    Target-->>GH: Command output
 ```
-
-### Token Exchange Examples
-
-The workflow prints decoded token claims for lab troubleshooting. This is useful to verify claim matching in OPA, but it should not be copied into production workflows.
-
-#### GitHub OIDC Token
-
-The GitHub runner first requests an OIDC token from `token.actions.githubusercontent.com`. OPA then will validates this token against the workload connection claims.
-
-```json
-{
-  "iss": "https://token.actions.githubusercontent.com",
-  "aud": "https://xyz.pam.okta.com",
-  "repository": "xyz/okta-lab-workloads",
-  "repository_owner": "xyz",
-  "repository_visibility": "private",
-  "ref": "refs/heads/main",
-  "ref_type": "branch",
-  "workflow": "OPA Workloads — SSH Linux",
-  "workflow_ref": "xyz/okta-lab-workloads/.github/workflows/opa-workloads-ssh-linux.yml@refs/heads/main",
-  "runner_environment": "github-hosted",
-  "sub": "repo:xyz/okta-lab-workloads:ref:refs/heads/main"
-}
-```
-
-The most useful claims for OPA workload connection rules are usually `repository_owner`, `repository`, `ref`, and `sub`.
-
-#### OPA Token After Workload Authentication
-
-After `sft wl authenticate`, OPA exchange the GitHub token, and returns a short-lived (ephemeral) token that includes the matched workload connection, role hint, team, and embedded GitHub workload claims.
-
-```json
-{
-  "aud": [
-    "okta.com"
-  ],
-  "iss": "00000000-0000-0000-0000-000000000000",
-  "oktapa.cid": "00000000-0000-0000-0000-000000000000",
-  "oktapa.cn": "github-actions",
-  "oktapa.rh": "workload-role-1",
-  "oktapa.tid": "00000000-0000-0000-0000-000000000000",
-  "oktapa.tn": "xyz",
-  "oktapa.wl": {
-    "repository": "xyz/okta-lab-workloads",
-    "repository_owner": "xyz",
-    "ref": "refs/heads/main",
-    "workflow": "OPA Workloads — SSH Linux",
-    "workflow_ref": "xyz/okta-lab-workloads/.github/workflows/opa-workloads-ssh-linux.yml@refs/heads/main"
-  },
-  "sub": "opa://xyz/github-actions/repo:xyz%2Fokta-lab-workloads:ref:refs%2Fheads%2Fmain"
-}
-```
-
-A successful token should map to the expected workload role and policy, then allow the execution of the requested actions (i.e. an SSH session or secret reveal).
 
 ---
 
-## Prerequisites for the Lab
+## Prerequisites
 
-- An **Okta Privileged Access** (OPA) tenant with Workloads feature enabled
-- An **Okta Admin Account** with DevOps Admin + Security Admin roles
-- A **GitHub Repository** with Actions enabled
-- The `sft` CLI is installed automatically by the workflow (Ubuntu runner required)
+- An Okta Privileged Access tenant with Workloads enabled
+- Okta DevOps Admin and Security Admin access for configuration
+- A GitHub repository with Actions enabled
+- An OPA-managed Linux server target
+- The `sft` CLI, installed automatically by the workflow on the Ubuntu runner
 
-For faster and reusable automation runs, this lab can use the companion ScaleFT client container image:
+For faster automation runs, this lab can also be adapted to use the companion ScaleFT client container image:
 
 ```text
 ghcr.io/fabiograsso/opa-scaleft-client:latest
 ```
 
-The image is maintained in [`opa-scaleft-docker`](https://github.com/fabiograsso/opa-scaleft-docker) and provides a generic container with the OPA `sft` client preinstalled. Workloads is one use case; the same image can be reused for other OPA automations.
+The image is maintained in [`opa-scaleft-docker`](https://github.com/fabiograsso/opa-scaleft-docker). The Docker sample in this repo is intentionally not executable by GitHub Actions because it is named `.sampledocker`, not `.yml`.
 
 ---
 
 ## OPA Configuration
 
-The following objects must be configured in OPA **before** running the workflow.
+### 1. Workload Connection
 
-### 1. Workload Connection (DevOps Admin)
-
-Navigate to **Okta Privileged Access → Access → Workloads → Connections** and create a new connection:
+Navigate to **Okta Privileged Access → Access → Workloads → Connections** and create a GitHub Actions workload connection.
 
 | Field | Value / Example |
 |-------|-------|
@@ -148,131 +86,106 @@ Navigate to **Okta Privileged Access → Access → Workloads → Connections** 
 
 ![OPA workload connection configured for GitHub Actions](docs/images/opa-workload-connection.png)
 
-#### Recommended GitHub OIDC claims
+For a stricter lab, add one or more GitHub OIDC claims:
 
-The workload connection validates claims from the GitHub Actions OIDC token. Start with a narrow rule for the lab repository, then adjust it for your environment.
-
-| Scope | Claim | Operator | Example value | Notes |
-|-------|-------|----------|---------------|-------|
-| GitHub owner | `repository_owner` | Equals | `xyz` | Allows repositories owned by the `xyz` GitHub user or organization |
-| One repository | `repository` | Equals | `xyz/okta-lab-workloads` | Restricts access to this lab repository |
-| One branch | `ref` | Equals | `refs/heads/main` | Restricts access to workflow runs from the `main` branch |
-| One workflow subject | `sub` | Equals | `repo:xyz/okta-lab-workloads:ref:refs/heads/main` | Combines repository and branch in one claim |
+| Scope | Claim | Example value | Notes |
+|-------|-------|---------------|-------|
+| GitHub owner | `repository_owner` | `xyz` | Allows repositories owned by the `xyz` GitHub user or organization |
+| One repository | `repository` | `xyz/okta-lab-workloads` | Restricts access to this lab repository |
+| One branch | `ref` | `refs/heads/main` | Restricts access to workflow runs from the `main` branch |
+| One workflow subject | `sub` | `repo:xyz/okta-lab-workloads:ref:refs/heads/main` | Combines repository and branch in one claim |
 
 For a simple lab it's okt the default claim of `repository_owner EQUALS xyz`, which allows any workflow from any repository owned by `xyz`. For better security, add the `repository` claim to restrict to a specific repository, and optionally the `ref` claim to restrict to a specific branch. The most secure option is to use the full `sub` claim, which combines repo and branch in one claim and cannot be bypassed by token manipulation.
 
-> After creation, the connection is in **Draft** status. A Security Admin must activate it before use.
+After creation, the connection starts in **Draft**. A Security Admin must activate it before the workflow can authenticate successfully.
 
-### 2. Activate the Connection (Security Admin)
+### 2. Workload Role
 
-Set the connection status from **Draft → Active**. Wait ~5 minutes for propagation before running the workflow.
-
-### 3. Workload Role (Security Admin)
-
-Navigate to **Okta Privileged Access → Access → Workloads → Roles** and create a role bound to the connection above.
+Navigate to **Okta Privileged Access → Access → Workloads → Roles** and create a workload role bound to the connection above. This role becomes the principal used by OPA policy.
 
 You can name it for example `workload-role-1`.
 
 ![OPA workload role bound to the GitHub Actions connection](docs/images/opa-workload-role.png)
 
-### 4. Policy Binding (Security Admin)
+### 3. Policy Binding
 
-Create a policy under **Okta Privileged Access → Policies**:
+Create (or update) a policy under **Okta Privileged Access → Policies**:
+
 - Name: `GitHub Actions Workloads Policy` (or similar)
 - Add the workload role as principal under **Select Workload Roles**
 - Do **not** enable MFA or Access Requests — a headless workload cannot respond to them
+- Add a **Server SSH session rule** granting access to your target server (i.e. `opa-linux-target`). Optionally, enable the Gateway for SSH access if your target is behind an OPA gateway.
 - Publish the policy
 
 ![OPA policy with workload role and rules](docs/images/opa-workloads-policy-overview.png)
 
-#### SSH Use Case: Server SSH Session Rule
-
-For the supported SSH workflow, add a **Server SSH session rule** granting access to your target server (i.e. `opa-linux-target`). Optionally, enable the Gateway for SSH access if your target is behind an OPA gateway.
+Server SSH rule example:
 
 ![OPA server SSH session rule for the Linux target](docs/images/opa-server-ssh-rule.png)
 
-#### Secret Reveal Use Case: Secret Rule (Future Only)
-
-For the Secret Reveal example, add a **Secret Rule** granting access to the secret folder (i.e. `production_server_secrets` folder). This is documented for future readiness only: OPA Workload Principal access to `sft secrets reveal` is not yet supported.
-
-![OPA secret rule granting reveal access to production_server_secrets](docs/images/opa-secret-rule.png)
-
 ---
 
-## GitHub Actions Configuration
+## GitHub Actions Variables
 
-### Repository Variables
-
-The workflows read configuration from **Actions Variables**. No static OPA secrets are required. Start with the common variables, then add only the variables for the use case you want to run.
-
-#### Common Variables
-
-These variables are used by both examples.
+All configuration is done with GitHub Actions **Variables**. No static OPA secrets are required.
 
 | Variable | Required | Description | Default / Example |
 |----------|----------|-------------|-------------------|
 | `OPA_ADDR` | Yes | OPA tenant URL | `https://xyz.pam.okta.com` |
 | `SFT_TEAM` | Yes | OPA team name | `xyz` |
-| `OPA_WORKLOAD_CONNECTION` | No | Name of the workload connection in OPA | `github-actions` |
-| `OPA_WORKLOAD_ROLE` | No | Name of the workload role in OPA | `workload-role-1` |
+| `OPA_WORKLOAD_CONNECTION` | No | Workload connection name | `github-actions` |
+| `OPA_WORKLOAD_ROLE` | No | Workload role name | `workload-role-1` |
+| `OPA_LINUX_TARGET` | No | Linux target name for the SSH test | `opa-linux-target` |
 
-#### SSH Workflow Variables
+![GitHub repository Actions variables for the OPA Workloads lab](docs/images/github-actions-variables.png)
 
-Use these for the supported SSH workflow: [`opa-workloads-ssh-linux.yml`](.github/workflows/opa-workloads-ssh-linux.yml).
+> [!WARNING]
+> This lab workflow prints decoded GitHub OIDC token claims and decoded OPA token content when available. This is useful in a disposable lab, but do not copy this behavior into production workflows.
 
-| Variable | Required | Description | Default / Example |
-|----------|----------|-------------|-------------------|
-| `OPA_LINUX_TARGET` | No | Linux server name used for the SSH test | `opa-linux-target` |
+### Optional AWS Security Group Auto-Update
 
-#### Optional AWS Variables for SSH
+If your OPA Gateway or target VM is reachable through a public AWS address, the inbound Security Group may need to allow the current GitHub-hosted runner IP. GitHub-hosted runner IP ranges are dynamic and broad, so this lab supports an optional just-in-time allowlist flow:
 
-These variables are only needed when the SSH target or gateway is protected by an AWS Security Group and you want the workflow to temporarily allow the current GitHub-hosted runner IP. See [AWS setup checklist](#aws-setup-checklist-step-by-step).
+1. Detect the current runner public IP.
+2. Add a temporary `/32` inbound rule to the configured AWS Security Group.
+3. Run the OPA Workloads SSH test.
+4. Remove the temporary rule in a cleanup step with `if: always()`.
+
+This feature is disabled by default and runs only when both `AWS_GROUP_ID` and `AWS_ROLE_TO_ASSUME` are configured.
 
 | Variable | Required for AWS mode | Description | Default / Example |
 |----------|-----------------------|-------------|-------------------|
-| `AWS_GROUP_ID` | Yes | AWS Security Group ID to update before SSH | `sg-0a1bc23d456e7890f` |
-| `AWS_ROLE_TO_ASSUME` | Yes | AWS IAM role ARN assumed through GitHub OIDC | `arn:aws:iam::123456789012:role/GitHubActionsRoleForOPAGateway` |
-| `AWS_REGION` | No | AWS region for the Security Group | `us-east-1` |
+| `AWS_GROUP_ID` | Yes | Security Group ID to update | `sg-0a1bc23d456e7890f` |
+| `AWS_ROLE_TO_ASSUME` | Yes | IAM role assumed through GitHub OIDC | `arn:aws:iam::123456789012:role/GitHubActionsRoleForOPAGateway` |
+| `AWS_REGION` | No | AWS region containing the Security Group | `us-east-1` |
 | `AWS_SECURITY_GROUP_PORT` | No | TCP port to open temporarily | `7234` |
 
-The AWS Security Group auto-update runs only when both `AWS_GROUP_ID` and `AWS_ROLE_TO_ASSUME` are configured.
-
-#### Secret Reveal Variables (Future Only)
-
-These variables are documented for the disabled preview workflow: [`opa-workloads-read-secret.off`](.github/workflows/opa-workloads-read-secret.off). Secret Reveal through OPA Workload Principals is not currently supported.
-
-| Variable | Required | Description | Default / Example |
-|----------|----------|-------------|-------------------|
-| `SECRET_RESOURCE_GROUP` | No | Resource group containing the secret folder | `production_servers` |
-| `SECRET_PROJECT` | No | Project containing the secret folder | `secrets` |
-| `SECRET_FOLDER` | No | Folder containing the target secret | `production_server_secrets` |
-| `SECRET_NAME` | No | Secret name inside `SECRET_FOLDER` | `MySql_root` |
-
 > [!WARNING]
-> This lab workflow prints decoded GitHub OIDC token claims and decoded OPA token content when available. Use this only in a disposable lab to inspect claims and capabilities. Never copy this behavior into production workflows.
+> Scope this to the minimum required Security Group and TCP port. Do not use this pattern to open broad network access, and never allow `0.0.0.0/0` for this lab.
 
-The SSH test runs against `OPA_LINUX_TARGET` and executes a few simple commands:
+The workflow uses [`aws-actions/configure-aws-credentials`](https://github.com/aws-actions/configure-aws-credentials) and GitHub OIDC. No long-lived AWS access keys are required.
 
-```bash
-sft ssh "$OPA_LINUX_TARGET" --command 'hostname && uname -a && whoami'
+Minimum IAM actions usually look like:
+
+```json
+{
+  "Action": [
+    "ec2:AuthorizeSecurityGroupIngress",
+    "ec2:RevokeSecurityGroupIngress",
+    "ec2:CreateTags"
+  ],
+  "Effect": "Allow",
+  "Resource": [
+    "arn:aws:ec2:<region>:<account-id>:security-group/<security-group-id>",
+    "arn:aws:ec2:<region>:<account-id>:security-group-rule/*"
+  ]
+}
 ```
 
-### sft CLI setup
+> [!NOTE]
+> See [AWS.md](AWS.md) for a complete example of the IAM policy and role trust policy.
 
-The SSH workflow is intentionally self-contained. The disabled Secret Reveal preview keeps the same shape for future use. Each example includes the OIDC, `sft` setup, and OPA Workloads authentication steps inline, even if that duplicates a little YAML. This makes the examples easier to read and copy:
-
-- request and print decoded GitHub OIDC token claims
-- install the `sft` CLI if it is not already available
-- authenticate with `sft wl authenticate`
-- print decoded OPA token content when the token is JWT-shaped
-
-The workflow intentionally does **not** cache apt-installed `scaleft-client-tools`. Caching system packages on GitHub-hosted runners is fragile because package paths, permissions, dependencies, and runner images can drift. If startup time becomes a real issue, prefer a self-hosted runner or custom container image with `sft` preinstalled.
-
-This lab references the companion [`opa-scaleft-docker`](https://github.com/fabiograsso/opa-scaleft-docker) image for that container-based approach:
-
-```text
-ghcr.io/fabiograsso/opa-scaleft-client:latest
-```
+---
 
 ### Set Environment Variables for GitHub Actions
 
@@ -306,71 +219,38 @@ gh variable list
 
 ---
 
-## Workflows
+## Workflow
 
-This lab separates the supported SSH path from the future Secret Reveal path.
+### sft CLI setup
 
-| Use case | Status | File |
-|----------|--------|------|
-| SSH to Linux target | Supported | [`opa-workloads-ssh-linux.yml`](.github/workflows/opa-workloads-ssh-linux.yml) |
-| Secret Reveal | Future example only | [`opa-workloads-read-secret.off`](.github/workflows/opa-workloads-read-secret.off) |
+The SSH workflow is intentionally self-contained, and includes the OIDC, `sft` setup, and OPA Workloads authentication steps inline. This makes the examples easier to read and copy:
 
-### Supported: `opa-workloads-ssh-linux.yml`
+- request and print decoded GitHub OIDC token claims
+- install the `sft` CLI if it is not already available
+- authenticate with `sft wl authenticate`
+- print decoded OPA token content when the token is JWT-shaped
 
-Runs an SSH test against `OPA_LINUX_TARGET`, which defaults to `opa-linux-target`.
+Altenratively, you can use the  [`opa-scaleft-docker`](https://github.com/fabiograsso/opa-scaleft-docker) image for a container-based approach, using the image `ghcr.io/fabiograsso/opa-scaleft-client:latest`.
 
-**Trigger:** Manual (`workflow_dispatch`) or on push to `main`
+### `opa-workloads-ssh-linux.yml`
+
+The supported workflow runs an SSH test against `OPA_LINUX_TARGET`.
+
+**Trigger:** manual (`workflow_dispatch`) or push to `main`
 
 **Steps:**
-1. Request a GitHub OIDC token.
-2. Install the `sft` CLI from the Okta PAM apt repository if needed.
-3. Authenticate to OPA with `sft wl authenticate`.
-4. Execute sample commands on the Linux target:
+
+1. Optionally configure AWS credentials and open a temporary Security Group rule.
+2. Request a GitHub OIDC token.
+3. Install the `sft` CLI if needed.
+4. Authenticate to OPA with `sft wl authenticate`.
+5. Run:
    ```bash
    sft ssh "$OPA_LINUX_TARGET" --command 'hostname && uname -a && whoami'
    ```
-5. If AWS auto-update is enabled, remove the temporary Security Group rule even if the SSH command fails.
+6. If AWS auto-update is enabled, remove the temporary Security Group rule even if the SSH command fails.
 
-### Future Only: `opa-workloads-read-secret.off`
-
-> [!IMPORTANT]
-> **Workloads support for Secret Reveal is included as an example but is not yet supported by OPA.**
-> OIDC authentication via Workloads works for SSH (Principal SSH access), but `sft secrets reveal` is not yet available for Workload Principals — tokens return `Missing capability: secret_folder.item_list` or `Missing capability: secret.resolve`.
->
-> The file has been renamed from `.yml` to `.off` so that GitHub Actions does not execute it, but the code is kept as a reference. This guide will be updated once the feature is supported by OPA.
-
-When available, this workflow will reveal one OPA secret through Workloads authentication, using the folder configured by `SECRET_RESOURCE_GROUP`, `SECRET_PROJECT`, and `SECRET_FOLDER`. The file is already complete. When OPA supports this capability, renaming it back to `.yml` will make it executable again.
-
-**Steps (preview):**
-1. Request a GitHub OIDC token.
-2. Install the `sft` CLI from the Okta PAM apt repository if needed.
-3. Authenticate to OPA with `sft wl authenticate`.
-4. Reveal the configured secret directly by folder path and secret name:
-   ```bash
-   sft secrets reveal --team "$SFT_TEAM" \
-     --resource-group "$SECRET_RESOURCE_GROUP" \
-     --project "$SECRET_PROJECT" \
-     --path "$SECRET_FOLDER" \
-     --name "$SECRET_NAME" \
-     --output json
-   ```
-
-### Docker samples
-
-The repository also includes two non-executable Docker examples:
-
-| Sample file | Purpose |
-|-------------|---------|
-| [`opa-workloads-read-secret.sampledocker`](.github/workflows/opa-workloads-read-secret.sampledocker) | Shows the read-secret workflow using `ghcr.io/fabiograsso/opa-scaleft-client:latest` |
-| [`opa-workloads-ssh-linux.sampledocker`](.github/workflows/opa-workloads-ssh-linux.sampledocker) | Shows the SSH workflow using `ghcr.io/fabiograsso/opa-scaleft-client:latest` |
-
-These files are intentionally not named `.yml` or `.yaml`, so GitHub Actions will not run them. They are copyable examples for labs that prefer the prebuilt Docker image over installing `sft` during each run.
-
----
-
-## Expected Output
-
-**SSH workflow:**
+Expected output:
 
 ```text
 ✅ sft installed: sft version X.Y.Z
@@ -384,209 +264,46 @@ Linux opa-linux-target ...
 ✅ SSH test completed successfully
 ```
 
-**Secret reveal workflow (when supported):**
-
-```
-✅ sft installed: sft version X.Y.Z
-✅ GitHub OIDC token obtained
-✅ OPA bearer token obtained via workload authentication
-
-📁 Folder: production_server_secrets  (project: secrets, resource_group: production_servers)
-   🔑 MySql_root
-      username: ***
-      password: ***
-      host: ***
-
-✅ OPA secret reveal completed successfully
-```
-
 ---
 
-## Optional AWS Security Group auto-update
 
-If your Okta PAM / ScaleFT gateway or target VM is reachable through a public AWS address, the inbound Security Group may need to allow the current GitHub-hosted runner IP. GitHub-hosted runner IP ranges are dynamic and broad, so this lab supports an optional just-in-time allowlist flow for the SSH workflow:
+## Upcoming Use Cases
 
-1. Detect the current runner public IP.
-2. Add a temporary `/32` inbound rule to the configured AWS Security Group.
-3. Run the OPA Workloads SSH test.
-4. Remove the temporary rule in a cleanup step with `if: always()`.
+The `main` branch only documents and runs what is working today: Workloads authentication with Principal SSH access.
 
-This is optional and is disabled by default. It runs only when `AWS_GROUP_ID` and `AWS_ROLE_TO_ASSUME` are configured:
+Additional use cases will be added when they are available and tested, including:
 
-| Variable | Required for AWS mode | Notes |
-|----------|-----------------------|-------|
-| `AWS_GROUP_ID` | Yes | Security Group ID to update |
-| `AWS_ROLE_TO_ASSUME` | Yes | IAM role assumed by GitHub Actions through OIDC |
-| `AWS_REGION` | No | Region containing the Security Group; defaults to `us-east-1` |
-| `AWS_SECURITY_GROUP_PORT` | No | TCP port to open; defaults to `7234` |
-
-> [!WARNING]
-> Scope this to the minimum required Security Group and TCP port. Do not use this pattern to open broad network access, and never allow `0.0.0.0/0` for this lab.
-
-The workflow uses [`aws-actions/configure-aws-credentials`](https://github.com/aws-actions/configure-aws-credentials) and GitHub OIDC. No long-lived AWS access keys are required.
-
-### AWS setup checklist (step by step)
-
-1. Create or identify the target Security Group
-   - Go to `EC2 > Network & Security > Security Groups`.
-   - Create or select the Security Group that must be updated temporarily during the workflow run.
-   - Record:
-     - Security Group ID (placeholder example: `sg-0a1bc23d456e7890f`)
-     - AWS region (example: `us-east-1`)
-
-2. Attach the Security Group to the target EC2 instance
-   - Go to `EC2 > Instances`, select the target VM, then open `Security > Security groups > Edit`.
-   - Add the Security Group from step 1 to the instance (or replace the current one, depending on your design).
-   - Save and verify that the instance (or its ENI) is using that Security Group.
-   - Ensure the workflow port is aligned with your service exposure:
-     - default is `7234`
-     - or set `AWS_SECURITY_GROUP_PORT` in GitHub Actions variables
-
-3. Create (or verify) the GitHub OIDC identity provider in IAM
-   - Go to `IAM > Identity providers > Add provider`.
-   - Provider type: `OpenID Connect`
-   - Provider URL: `https://token.actions.githubusercontent.com`
-   - Audience: `sts.amazonaws.com`
-   - If it already exists, reuse it.
-
-4. Create a minimal IAM policy for only that Security Group
-   - Go to `IAM > Policies > Create policy > JSON`.
-   - Use a least-privilege policy like this:
-    ```json
-    {
-      "Version": "2012-10-17",
-      "Statement": [
-        {
-          "Effect": "Allow",
-          "Action": [
-            "ec2:AuthorizeSecurityGroupIngress",
-            "ec2:RevokeSecurityGroupIngress",
-            "ec2:CreateTags"
-          ],
-          "Resource": [
-            "arn:aws:ec2:<region>:<account-id>:security-group/<security-group-id>",
-            "arn:aws:ec2:<region>:<account-id>:security-group-rule/*"
-          ]
-        }
-      ]
-    }
-    ```
-
-   - Concrete placeholder example:
-
-    ```json
-    {
-      "Version": "2012-10-17",
-      "Statement": [
-        {
-          "Effect": "Allow",
-          "Action": [
-            "ec2:AuthorizeSecurityGroupIngress",
-            "ec2:RevokeSecurityGroupIngress",
-            "ec2:CreateTags"
-          ],
-          "Resource": [
-            "arn:aws:ec2:us-east-1:123456789012:security-group/sg-0a1bc23d456e7890f",
-            "arn:aws:ec2:us-east-1:123456789012:security-group-rule/*"
-          ]
-        }
-      ]
-    }
-    ```
-
-5. Create an IAM role for GitHub Actions (not EC2)
-   - Go to `IAM > Roles > Create role`.
-   - Trusted entity type: `Web identity`
-   - Identity provider: `token.actions.githubusercontent.com`
-   - Audience: `sts.amazonaws.com`
-  - Attach the policy from step 4.
-   - Example role ARN format:
-     - `arn:aws:iam::123456789012:role/GitHubActionsRoleForOPAGateway`
-
-6. Restrict the role trust policy to your repository
-   - In the role, open `Trust relationships > Edit trust policy`.
-   - Restrict by `aud` and `sub` (repo and optionally branch/environment).
-   - Example:
-
-    ```json
-    {
-      "Version": "2012-10-17",
-      "Statement": [
-        {
-          "Effect": "Allow",
-          "Principal": {
-            "Federated": "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
-          },
-          "Action": "sts:AssumeRoleWithWebIdentity",
-          "Condition": {
-            "StringEquals": {
-              "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-              "token.actions.githubusercontent.com:sub": "repo:xyz/okta-lab-workloads:ref:refs/heads/main"
-            }
-          }
-        }
-      ]
-    }
-    ```
-
-7. Configure GitHub Actions variables in the repository
-   - Go to `Settings > Secrets and variables > Actions > Variables`.
-   - Required for AWS mode:
-     - `AWS_GROUP_ID=sg-0a1bc23d456e7890f`
-     - `AWS_ROLE_TO_ASSUME=arn:aws:iam::123456789012:role/GitHubActionsRoleForOPAGateway`
-   - Optional:
-     - `AWS_REGION=us-east-1`
-     - `AWS_SECURITY_GROUP_PORT=7234`
-
-8. Verify workflow permissions and run
-   - Ensure the workflow keeps:
-     - `permissions.id-token: write`
-     - `permissions.contents: read`
-   - Run `OPA Workloads - SSH Linux` and confirm these steps appear:
-     - `Configure AWS credentials for temporary Security Group access`
-     - `Allow current runner IP in AWS Security Group`
-     - `Run SSH test`
-     - `Remove current runner IP from AWS Security Group`
-
-If your AWS policy validates request tags or rule tags, the workflow tags newly created Security Group rules with:
-
-- `CreatedBy=GitHubActions`
-- `Repository=<owner>/<repo>`
-- `GitHubRunId=<run-id>`
-
----
-
-## Troubleshooting
-
-### Common OPA Workloads Issues
-
-| Error | Likely Cause | Fix |
-|-------|-------------|-----|
-| `JWT validation failed` | JWKS URL or claim values mismatch | Verify `iss`, `aud`, `sub` in the workload connection config |
-| `Connection not found` | Wrong value in `OPA_WORKLOAD_CONNECTION` variable | Match the variable to the exact connection name in OPA |
-| `Connection is in Draft state` | Connection not activated by Security Admin | Security Admin must promote Draft → Active |
-| `sft: command not found` | sft install step failed | Confirm the runner is Ubuntu |
-
-### SSH and AWS Issues
-
-| Error | Likely Cause | Fix |
-|-------|-------------|-----|
-| `Could not assume role with OIDC` | AWS trust policy does not match the repository, branch, or audience | Check the IAM role trust policy for GitHub Actions OIDC |
-| `UnauthorizedOperation` from AWS CLI | IAM role lacks permission to update or tag the Security Group rule | Limit and grant `ec2:AuthorizeSecurityGroupIngress`, `ec2:RevokeSecurityGroupIngress`, and `ec2:CreateTags` for the target Security Group rule |
-| SSH exits with `255` and no command output | Network path, gateway, Security Group, or OPA SSH policy issue | Check the `sft list-servers` output, AWS temporary rule logs, target SG attachment, and Server SSH session rule |
-
-### Secret Reveal Current Limitation
-
-| Error | Meaning | Fix |
-|-------|---------|-----|
-| `Missing capability: secret_folder.item_list` | Secret listing is not currently available for OPA Workload Principals | Expected for now; keep the `.off` workflow as reference |
-| `Missing capability: secret.resolve` | Secret reveal is not currently available for OPA Workload Principals | Expected for now; this guide will be updated when OPA supports it |
+- OPA secret retrieval with `sft secrets`
+- database access workflows
+- Kubernetes access workflows
+- additional automation patterns for non-human identities
 
 ---
 
 ## Resources
 
 - [OPA Workloads Overview](https://help.okta.com/oie/en-us/content/topics/privileged-access/pam-workloads.htm)
+- [Requirements and limitations](https://help.okta.com/oie/en-us/content/topics/privileged-access/pam-requirements-workloads.htm)
 - [Configure Workload Authentication](https://help.okta.com/oie/en-us/content/topics/privileged-access/pam-configure-workloads.htm)
 - [Configure Workload Connection](https://help.okta.com/oie/en-us/content/topics/privileged-access/pam-configure-workload-connection.htm)
+- [CLI command for workload authentication](https://help.okta.com/oie/en-us/content/topics/privileged-access/pam-configure-workload-cli.htm)
+- [Principal SSH access for automated workloads](https://help.okta.com/oie/en-us/content/topics/privileged-access/pam-ssh-access-workloads.htm)
 - [GitHub Actions OIDC Security Hardening](https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect)
+
+---
+
+## 👤 Author
+
+**Fabio Grasso**
+
+- Blog: [iam.fabiograsso.net](https://iam.fabiograsso.net)
+- GitHub: [@fabiograsso](https://github.com/fabiograsso)
+- LinkedIn: [Fabio Grasso](https://www.linkedin.com/in/fabiograsso82)
+
+---
+
+**Last Updated**: 2026-06-25
+
+<p align="center">
+  Made with ❤️ for the Okta community
+</p>
