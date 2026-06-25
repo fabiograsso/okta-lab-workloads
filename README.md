@@ -18,10 +18,10 @@ OPA Workloads provides secretless authentication for non-human identities such a
 
 This `main` branch intentionally focuses on the **currently working SSH use case**.
 
-| Goal | Status | Workflow |
-|------|--------|----------|
-| Run an SSH test against a Linux target | Supported | [`opa-workloads-ssh-linux.yml`](.github/workflows/opa-workloads-ssh-linux.yml) |
-| Run the same SSH test from a prebuilt client container | Sample only | [`opa-workloads-ssh-linux.sampledocker`](.github/workflows/opa-workloads-ssh-linux.sampledocker) |
+| Goal | Workflow |
+|------|----------|
+| Run an SSH test against a Linux target [`opa-workloads-ssh-linux.yml`](.github/workflows/opa-workloads-ssh-linux.yml) |
+| Run the same SSH test from a prebuilt client container | [`opa-workloads-ssh-linux.sampledocker`](.github/workflows/opa-workloads-ssh-linux.sampledocker) |
 
 Secret retrieval and additional workload use cases are tracked as future examples. See [Upcoming Use Cases](#upcoming-use-cases).
 
@@ -48,6 +48,9 @@ sequenceDiagram
     OPA->>Target: Authorize Principal SSH access
     Target-->>GH: Command output
 ```
+
+> [!NOTE]
+> The GitHub Actions runner requests a short-lived OIDC token from GitHub, then exchanges it for a short-lived OPA token. The OPA token is used to authorize the SSH command on the target.
 
 ---
 
@@ -185,8 +188,6 @@ Minimum IAM actions usually look like:
 > [!NOTE]
 > See [AWS.md](AWS.md) for a complete example of the IAM policy and role trust policy.
 
----
-
 ### Set Environment Variables for GitHub Actions
 
 #### Option A — GitHub CLI (recommended)
@@ -219,38 +220,103 @@ gh variable list
 
 ---
 
-## Workflow
+## Workflow Description
 
-### sft CLI setup
-
-The SSH workflow is intentionally self-contained, and includes the OIDC, `sft` setup, and OPA Workloads authentication steps inline. This makes the examples easier to read and copy:
+The workflow `opa-workloads-ssh-linux.yml` is intentionally self-contained, and includes the OIDC, `sft` setup, and OPA Workloads authentication steps inline. This makes the examples easier to read and copy:
 
 - request and print decoded GitHub OIDC token claims
 - install the `sft` CLI if it is not already available
 - authenticate with `sft wl authenticate`
 - print decoded OPA token content when the token is JWT-shaped
 
-Altenratively, you can use the  [`opa-scaleft-docker`](https://github.com/fabiograsso/opa-scaleft-docker) image for a container-based approach, using the image `ghcr.io/fabiograsso/opa-scaleft-client:latest`.
-
-### `opa-workloads-ssh-linux.yml`
-
-The supported workflow runs an SSH test against `OPA_LINUX_TARGET`.
-
 **Trigger:** manual (`workflow_dispatch`) or push to `main`
 
 **Steps:**
 
-1. Optionally configure AWS credentials and open a temporary Security Group rule.
-2. Request a GitHub OIDC token.
-3. Install the `sft` CLI if needed.
+1. Install the `sft` CLI if needed.
+2. Optionally configure AWS credentials and open a temporary Security Group rule.
+3. Request a GitHub OIDC token.
 4. Authenticate to OPA with `sft wl authenticate`.
-5. Run:
-   ```bash
-   sft ssh "$OPA_LINUX_TARGET" --command 'hostname && uname -a && whoami'
-   ```
+5. Run SSH test against the OPA-managed Linux target.
 6. If AWS auto-update is enabled, remove the temporary Security Group rule even if the SSH command fails.
+ 
 
-Expected output:
+### 1. sft CLI setup
+
+The first step of the workflow install the `sft` CLI, by downloading the latest version from the official Okta ScaleFT repository. The CLI is then used to authenticate to OPA and run the SSH command.
+
+Altenratively, you can use the  [`opa-scaleft-docker`](https://github.com/fabiograsso/opa-scaleft-docker) image for a container-based approach, using the image `ghcr.io/fabiograsso/opa-scaleft-client:latest`.
+
+### 2. Optional AWS Security Group auto-update
+
+See [Optional AWS Security Group Auto-Update](#optional-aws-security-group-auto-update) for details. To resume, if the required variables are set, the workflow will:
+- Detect the current runner public IP
+- Add a temporary `/32` inbound rule to the configured AWS Security Group
+- At the end, remove the temporary rule in a cleanup step with `if: always()`
+
+### 3. Request GitHub OIDC token
+
+The GitHub runner first requests an OIDC token from `token.actions.githubusercontent.com`. OPA validates this token against the workload connection claims.
+
+Example decoded claims:
+
+```json
+{
+  "iss": "https://token.actions.githubusercontent.com",
+  "aud": "https://xyz.pam.okta.com",
+  "repository": "xyz/okta-lab-workloads",
+  "repository_owner": "xyz",
+  "repository_visibility": "private",
+  "ref": "refs/heads/main",
+  "ref_type": "branch",
+  "workflow": "OPA Workloads — SSH Linux",
+  "workflow_ref": "xyz/okta-lab-workloads/.github/workflows/opa-workloads-ssh-linux.yml@refs/heads/main",
+  "runner_environment": "github-hosted",
+  "sub": "repo:xyz/okta-lab-workloads:ref:refs/heads/main"
+}
+```
+
+The most useful claims for OPA workload connection rules are usually `repository_owner`, `repository`, `ref`, and `sub`.
+
+### 4. Authenticate with OPA Workloads
+
+The workflow uses the `sft wl authenticate` command to exchange the GitHub OIDC token for a short-lived OPA token that includes the matched workload connection, role hint, team, and embedded GitHub workload claims.
+
+Example decoded OPA token content:
+
+```json
+{
+  "aud": [
+    "okta.com"
+  ],
+  "iss": "00000000-0000-0000-0000-000000000000",
+  "oktapa.cid": "00000000-0000-0000-0000-000000000000",
+  "oktapa.cn": "github-actions",
+  "oktapa.rh": "workload-role-1",
+  "oktapa.tid": "00000000-0000-0000-0000-000000000000",
+  "oktapa.tn": "xyz",
+  "oktapa.wl": {
+    "repository": "xyz/okta-lab-workloads",
+    "repository_owner": "xyz",
+    "ref": "refs/heads/main",
+    "workflow": "OPA Workloads — SSH Linux",
+    "workflow_ref": "xyz/okta-lab-workloads/.github/workflows/opa-workloads-ssh-linux.yml@refs/heads/main"
+  },
+  "sub": "opa://xyz/github-actions/repo:xyz%2Fokta-lab-workloads:ref:refs%2Fheads%2Fmain"
+}
+```
+
+A successful token should map to the expected workload role and policy, then allow the execution of the requested SSH action.
+
+### 5. Run SSH test
+
+Finally, the workflow runs a simple SSH command on the OPA-managed Linux target. The command is:
+
+```bash
+sft ssh "$OPA_LINUX_TARGET" --command 'hostname && uname -a && whoami'
+```
+
+### Expected output
 
 ```text
 ✅ sft installed: sft version X.Y.Z
@@ -265,7 +331,6 @@ Linux opa-linux-target ...
 ```
 
 ---
-
 
 ## Upcoming Use Cases
 
