@@ -20,7 +20,7 @@ This `main` branch intentionally focuses on the **currently working SSH use case
 
 | Goal | Workflow |
 |------|----------|
-| Run an SSH test against a Linux target [`opa-workloads-ssh-linux.yml`](.github/workflows/opa-workloads-ssh-linux.yml) |
+| Run an SSH test against a Linux target | [`opa-workloads-ssh-linux.yml`](.github/workflows/opa-workloads-ssh-linux.yml) |
 | Run the same SSH test from a prebuilt client container | [`opa-workloads-ssh-linux.sampledocker`](.github/workflows/opa-workloads-ssh-linux.sampledocker) |
 
 Secret retrieval and additional workload use cases are tracked as future examples. See [Upcoming Use Cases](#upcoming-use-cases).
@@ -98,7 +98,7 @@ For a stricter lab, add one or more GitHub OIDC claims:
 | One branch | `ref` | `refs/heads/main` | Restricts access to workflow runs from the `main` branch |
 | One workflow subject | `sub` | `repo:xyz/okta-lab-workloads:ref:refs/heads/main` | Combines repository and branch in one claim |
 
-For a simple lab it's okt the default claim of `repository_owner EQUALS xyz`, which allows any workflow from any repository owned by `xyz`. For better security, add the `repository` claim to restrict to a specific repository, and optionally the `ref` claim to restrict to a specific branch. The most secure option is to use the full `sub` claim, which combines repo and branch in one claim and cannot be bypassed by token manipulation.
+For a simple lab, the default claim `repository_owner EQUALS xyz` is acceptable, but it allows any workflow from any repository owned by `xyz`. For better security, add the `repository` claim to restrict to a specific repository, and optionally the `ref` claim to restrict to a specific branch. The most secure option is to use the full `sub` claim, which combines repo and branch in one claim and cannot be bypassed by token manipulation.
 
 After creation, the connection starts in **Draft**. A Security Admin must activate it before the workflow can authenticate successfully.
 
@@ -243,13 +243,13 @@ The workflow `opa-workloads-ssh-linux.yml` is intentionally self-contained, and 
 
 ### 1. sft CLI setup
 
-The first step of the workflow install the `sft` CLI, by downloading the latest version from the official Okta ScaleFT repository. The CLI is then used to authenticate to OPA and run the SSH command.
+The first step of the workflow installs the `sft` CLI, by downloading the latest version from the official Okta ScaleFT repository. The CLI is then used to authenticate to OPA and run the SSH command.
 
-Altenratively, you can use the  [`opa-scaleft-docker`](https://github.com/fabiograsso/opa-scaleft-docker) image for a container-based approach, using the image `ghcr.io/fabiograsso/opa-scaleft-client:latest`.
+Alternatively, you can use the [`opa-scaleft-docker`](https://github.com/fabiograsso/opa-scaleft-docker) image for a container-based approach: `ghcr.io/fabiograsso/opa-scaleft-client:latest`.
 
 ### 2. Optional AWS Security Group auto-update
 
-See [Optional AWS Security Group Auto-Update](#optional-aws-security-group-auto-update) for details. To resume, if the required variables are set, the workflow will:
+See [Optional AWS Security Group Auto-Update](#optional-aws-security-group-auto-update) for details. In short, if the required variables are set, the workflow will:
 - Detect the current runner public IP
 - Add a temporary `/32` inbound rule to the configured AWS Security Group
 - At the end, remove the temporary rule in a cleanup step with `if: always()`
