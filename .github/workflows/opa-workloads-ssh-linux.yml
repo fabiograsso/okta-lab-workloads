@@ -22,7 +22,6 @@ on:
 
 permissions:
   id-token: write   # Required to request a GitHub OIDC token
-  contents: read
 
 jobs:
   ssh-linux:
@@ -30,9 +29,6 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Install sft CLI
         run: |
           set -euo pipefail
@@ -57,7 +53,7 @@ jobs:
       # are set in the workflow variables.
       - name: Configure AWS credentials for temporary Security Group access
         if: ${{ vars.AWS_GROUP_ID != '' && vars.AWS_ROLE_TO_ASSUME != '' }}
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6.2.2
         with:
           role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
@@ -70,6 +66,11 @@ jobs:
           AWS_SECURITY_GROUP_PORT: ${{ vars.AWS_SECURITY_GROUP_PORT || '7234' }}
         run: |
           set -euo pipefail
+
+          if [ -z "$AWS_GROUP_ID" ] || [ -z "$AWS_REGION" ] || [ -z "$AWS_SECURITY_GROUP_PORT" ]; then
+            echo "❌ Invalid AWS configuration: AWS_GROUP_ID, AWS_ROLE_TO_ASSUME, and AWS_SECURITY_GROUP_PORT are required when AWS auto-update is enabled."
+            exit 1
+          fi
 
           if ! [[ "$AWS_SECURITY_GROUP_PORT" =~ ^[0-9]+$ ]] || [ "$AWS_SECURITY_GROUP_PORT" -lt 1 ] || [ "$AWS_SECURITY_GROUP_PORT" -gt 65535 ]; then
             echo "❌ Invalid AWS_SECURITY_GROUP_PORT: must be a TCP port between 1 and 65535."

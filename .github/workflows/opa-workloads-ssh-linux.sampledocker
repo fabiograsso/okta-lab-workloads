@@ -17,7 +17,6 @@ on:
 
 permissions:
   id-token: write
-  contents: read
 
 jobs:
   ssh-linux:
@@ -29,7 +28,7 @@ jobs:
     steps:
       - name: Configure AWS credentials for temporary Security Group access
         if: ${{ vars.AWS_GROUP_ID != '' && vars.AWS_ROLE_TO_ASSUME != '' }}
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6.2.2
         with:
           role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
@@ -153,13 +152,18 @@ jobs:
             printf '%s' "$padded_part" | base64 -d 2>/dev/null | jq .
           }
 
+          JWT_HEADER=$(decode_jwt_part "$(echo "$OIDC_TOKEN" | cut -d '.' -f 1)")
+          JWT_PAYLOAD=$(decode_jwt_part "$(echo "$OIDC_TOKEN" | cut -d '.' -f 2)")
+
           echo "OIDC_TOKEN_HEADER:"
-          decode_jwt_part "$(echo "$OIDC_TOKEN" | cut -d '.' -f 1)"
+          echo "$JWT_HEADER"
+          echo " "
           echo "OIDC_TOKEN_PAYLOAD:"
-          decode_jwt_part "$(echo "$OIDC_TOKEN" | cut -d '.' -f 2)"
+          echo "$JWT_PAYLOAD"
 
           echo "::add-mask::$OIDC_TOKEN"
           echo "OIDC_TOKEN=$OIDC_TOKEN" >> "$GITHUB_ENV"
+          echo "✅ GitHub OIDC token obtained"
 
       - name: Authenticate with OPA Workloads
         env:
@@ -175,7 +179,7 @@ jobs:
             exit 1
           fi
 
-          OPA_TOKEN=$(sft wl authenticate \
+          export OPA_TOKEN=$(sft wl authenticate \
             --team "$SFT_TEAM" \
             --connection "$OPA_WORKLOAD_CONNECTION" \
             --jwt-env OIDC_TOKEN \
@@ -188,10 +192,47 @@ jobs:
             exit 1
           fi
 
+          # ⚠️ LAB DEBUG ONLY:
+          # Print decoded OPA token content when the token is JWT-shaped.
+          # This is useful for troubleshooting capabilities and claims, but do not do this in production.
+          echo "⚠️ LAB DEBUG: OPA token content is printed below when decodable. Do not do this in production."
+          echo " "
+
+          decode_jwt_part() {
+            local part="$1"
+            local padded_part
+            padded_part=$(printf '%s' "$part" | tr '_-' '/+')
+
+            case $((${#padded_part} % 4)) in
+              2) padded_part="${padded_part}==" ;;
+              3) padded_part="${padded_part}=" ;;
+            esac
+
+            printf '%s' "$padded_part" | base64 -d 2>/dev/null | jq .
+          }
+
+          if [[ "$OPA_TOKEN" == *.*.* ]]; then
+            OPA_TOKEN_HEADER=$(decode_jwt_part "$(echo "$OPA_TOKEN" | cut -d '.' -f 1)" || true)
+            OPA_TOKEN_PAYLOAD=$(decode_jwt_part "$(echo "$OPA_TOKEN" | cut -d '.' -f 2)" || true)
+
+            if [ -n "$OPA_TOKEN_HEADER" ] && [ -n "$OPA_TOKEN_PAYLOAD" ]; then
+              echo "OPA_TOKEN_HEADER:"
+              echo "$OPA_TOKEN_HEADER"
+              echo " "
+              echo "OPA_TOKEN_PAYLOAD:"
+              echo "$OPA_TOKEN_PAYLOAD"
+            else
+              echo "OPA_TOKEN could not be decoded as JSON JWT content."
+            fi
+          else
+            echo "OPA_TOKEN is not JWT-shaped; it appears to be opaque, so there are no local claims to print."
+          fi
+
           echo "::add-mask::$OPA_TOKEN"
           echo "OPA_TOKEN=$OPA_TOKEN" >> "$GITHUB_ENV"
           echo "OPA_ADDR=$OPA_ADDR"   >> "$GITHUB_ENV"
           echo "SFT_TEAM=$SFT_TEAM"   >> "$GITHUB_ENV"
+          echo "✅ OPA bearer token obtained via workload authentication"
 
       - name: Run SSH test
         env:
